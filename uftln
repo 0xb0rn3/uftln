@@ -142,7 +142,83 @@ scan_network() {
     declare -A DISCOVERED_HOSTS
     
     if command -v arp-scan >/dev/null 2>&1; then
-        while IFS=
+        while IFS=$'\t' read -r ip mac vendor; do
+            [[ "$ip" == "$LOCAL_IP" ]] && continue
+            DISCOVERED_HOSTS["$ip"]="$mac | $vendor"
+        done < <(sudo arp-scan --interface="$INTERFACE" --localnet 2>/dev/null | grep -E '^[0-9]+\.' | awk '{print $1"\t"$2"\t"$3" "$4" "$5}')
+    fi
+    
+    # Nmap scan for service detection
+    if command -v nmap >/dev/null 2>&1; then
+        local temp_file=$(mktemp)
+        nmap -p 21,22,990,989 -T4 --open "$SUBNET" -oG "$temp_file" >/dev/null 2>&1
+        
+        while read -r line; do
+            if [[ $line =~ Host:\ ([0-9.]+)\ \(.*Ports:\ (.+) ]]; then
+                local ip="${BASH_REMATCH[1]}"
+                local ports="${BASH_REMATCH[2]}"
+                
+                [[ "$ip" == "$LOCAL_IP" ]] && continue
+                
+                local services=""
+                [[ $ports =~ 21/open ]] && services+="FTP "
+                [[ $ports =~ 22/open ]] && services+="SSH "
+                [[ $ports =~ 990/open ]] && services+="FTPS "
+                [[ $ports =~ 989/open ]] && services+="FTPS "
+                
+                if [[ -n "$services" ]]; then
+                    if [[ -n "${DISCOVERED_HOSTS[$ip]:-}" ]]; then
+                        DISCOVERED_HOSTS["$ip"]="${DISCOVERED_HOSTS[$ip]} | Services: $services"
+                    else
+                        DISCOVERED_HOSTS["$ip"]="Unknown MAC | Services: $services"
+                    fi
+                fi
+            fi
+        done < "$temp_file"
+        rm -f "$temp_file"
+    fi
+    
+    # Display results
+    if [[ ${#DISCOVERED_HOSTS[@]} -eq 0 ]]; then
+        echo -e "${Y}No servers with FTP/SSH services detected on network${N}\n"
+        return 1
+    fi
+    
+    echo -e "${G}${BOLD}╔═══════════════════════════════════════════════════════╗${N}"
+    echo -e "${G}${BOLD}║           DISCOVERED SERVERS ON NETWORK               ║${N}"
+    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════╝${N}\n"
+    
+    local -a IP_ARRAY
+    local idx=1
+    
+    for ip in "${!DISCOVERED_HOSTS[@]}"; do
+        IP_ARRAY+=("$ip")
+        echo -e "  ${Y}[$idx]${N} ${BOLD}$ip${N}"
+        echo -e "      ${C}${DISCOVERED_HOSTS[$ip]}${N}"
+        echo ""
+        ((idx++))
+    done
+    
+    echo -e "${Y}[0]${N} Manually enter server details"
+    echo -e "${Y}[R]${N} Rescan network"
+    echo ""
+    
+    read -p "$(echo -e ${Y}Select server [0-${#IP_ARRAY[@]}] or R: ${N})" SERVER_CHOICE
+    
+    if [[ "$SERVER_CHOICE" =~ ^[Rr]$ ]]; then
+        scan_network
+        return $?
+    elif [[ "$SERVER_CHOICE" == "0" ]]; then
+        return 1
+    elif [[ $SERVER_CHOICE -ge 1 ]] && [[ $SERVER_CHOICE -le ${#IP_ARRAY[@]} ]]; then
+        HOST="${IP_ARRAY[$((SERVER_CHOICE-1))]}"
+        echo -e "${G}✓ Selected: ${BOLD}$HOST${N}\n"
+        return 0
+    else
+        echo -e "${R}Invalid selection!${N}"
+        return 1
+    fi
+}
 
 # =====================================================================
 #  STEALTHY HOST DETECTION
