@@ -15,18 +15,278 @@ BUFFER_SIZE="131072"
 # Colors
 G="\e[92m"; R="\e[91m"; Y="\e[93m"; B="\e[94m"; M="\e[95m"; C="\e[96m"; N="\e[0m"; BOLD="\e[1m"
 
-# Global vars
-PROTOCOL=""
-INTERFACE=""
-CONNECTION_STRING=""
-REMOTE_PATH=""
-LOCAL_PATH=""
-MODE=""
-USERNAME=""
-HOST=""
-PORT=""
-SSH_KEY=""
+# =====================================================================
+#  PLATFORM DETECTION & TERMUX ADAPTATION SYSTEM
+# =====================================================================
 
+# Global platform flags - these control feature availability
+IS_TERMUX=false
+IS_ANDROID=false
+IS_DESKTOP_LINUX=false
+HAS_ROOT=false
+HAS_MAGISK=false
+HAS_TRADITIONAL_SUDO=false
+CAN_TUNE_KERNEL=false
+CAN_SCAN_NETWORK=false
+CAN_USE_ETHTOOL=false
+CAN_USE_ARP_SCAN=false
+CAN_USE_NMAP=false
+TERMUX_PREFIX=""
+
+detect_platform() {
+    echo -e "${B}${BOLD}[PLATFORM] Detecting environment...${N}"
+    
+    # First check: Are we in Termux?
+    if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]]; then
+        IS_TERMUX=true
+        IS_ANDROID=true
+        TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+        echo -e "${C}✓ Detected: Termux on Android${N}"
+    # Second check: Are we on Android but not Termux? (less common)
+    elif [[ -d "/system/app" ]] && [[ -d "/system/priv-app" ]]; then
+        IS_ANDROID=true
+        echo -e "${C}✓ Detected: Android system${N}"
+    # Default: We're on desktop Linux
+    else
+        IS_DESKTOP_LINUX=true
+        echo -e "${C}✓ Detected: Desktop Linux${N}"
+    fi
+    
+    # Root detection - this is platform-specific
+    if $IS_TERMUX; then
+        detect_termux_root
+    elif $IS_ANDROID; then
+        detect_android_root
+    else
+        detect_desktop_root
+    fi
+    
+    # Feature capability detection based on platform and root status
+    detect_feature_capabilities
+    
+    echo ""
+}
+
+detect_termux_root() {
+    echo -e "${Y}[ROOT CHECK] Checking Termux root access...${N}"
+    
+    # Check if tsu (Termux SU) is available - this indicates Magisk integration
+    if command -v tsu >/dev/null 2>&1; then
+        # Test if tsu actually works
+        if tsu -c "id" >/dev/null 2>&1; then
+            HAS_ROOT=true
+            HAS_MAGISK=true
+            echo -e "${G}✓ Root access available via Magisk (tsu)${N}"
+            
+            # Check if we can actually modify kernel parameters
+            if tsu -c "sysctl -w net.ipv4.tcp_window_scaling=1" >/dev/null 2>&1; then
+                CAN_TUNE_KERNEL=true
+                echo -e "${G}✓ Kernel tuning available${N}"
+            else
+                echo -e "${Y}⚠ Root available but kernel tuning blocked (SELinux/kernel config)${N}"
+            fi
+            return
+        fi
+    fi
+    
+    # Check if su binary exists and works (generic root)
+    if command -v su >/dev/null 2>&1; then
+        if su -c "id" >/dev/null 2>&1; then
+            HAS_ROOT=true
+            echo -e "${G}✓ Root access available via su${N}"
+            
+            # Test kernel tuning capability
+            if su -c "sysctl -w net.ipv4.tcp_window_scaling=1" >/dev/null 2>&1; then
+                CAN_TUNE_KERNEL=true
+                echo -e "${G}✓ Kernel tuning available${N}"
+            else
+                echo -e "${Y}⚠ Root available but kernel tuning blocked${N}"
+            fi
+            return
+        fi
+    fi
+    
+    echo -e "${Y}⚠ No root access detected - some features will be limited${N}"
+}
+
+detect_android_root() {
+    echo -e "${Y}[ROOT CHECK] Checking Android root access...${N}"
+    
+    # Check for Magisk su
+    if [[ -f "/sbin/su" ]] || [[ -f "/system/xbin/su" ]]; then
+        if su -c "id" >/dev/null 2>&1; then
+            HAS_ROOT=true
+            HAS_MAGISK=true
+            echo -e "${G}✓ Magisk root detected${N}"
+            return
+        fi
+    fi
+    
+    echo -e "${Y}⚠ No root access on Android device${N}"
+}
+
+detect_desktop_root() {
+    echo -e "${Y}[ROOT CHECK] Checking sudo access...${N}"
+    
+    # On desktop Linux, check for sudo
+    if command -v sudo >/dev/null 2>&1; then
+        # Test if sudo works without password (cached credentials) or with password
+        if sudo -n true 2>/dev/null; then
+            HAS_ROOT=true
+            HAS_TRADITIONAL_SUDO=true
+            CAN_TUNE_KERNEL=true
+            echo -e "${G}✓ Sudo access available (passwordless)${N}"
+        elif sudo -v 2>/dev/null; then
+            HAS_ROOT=true
+            HAS_TRADITIONAL_SUDO=true
+            CAN_TUNE_KERNEL=true
+            echo -e "${G}✓ Sudo access available${N}"
+        else
+            echo -e "${Y}⚠ Sudo available but requires password - you'll be prompted when needed${N}"
+            HAS_ROOT=true
+            HAS_TRADITIONAL_SUDO=true
+            CAN_TUNE_KERNEL=true
+        fi
+    else
+        echo -e "${Y}⚠ No sudo available - kernel tuning will be skipped${N}"
+    fi
+}
+
+detect_feature_capabilities() {
+    echo -e "${Y}[FEATURES] Detecting available tools and capabilities...${N}"
+    
+    # Network scanning tools detection
+    if $IS_TERMUX; then
+        # In Termux, check for Termux-specific package installations
+        if command -v nmap >/dev/null 2>&1; then
+            if $HAS_ROOT; then
+                CAN_USE_NMAP=true
+                CAN_SCAN_NETWORK=true
+                echo -e "${G}✓ Nmap available (root required for scanning)${N}"
+            else
+                echo -e "${Y}⚠ Nmap installed but needs root for network scanning${N}"
+            fi
+        fi
+        
+        # arp-scan is rarely available in Termux, even with root
+        if command -v arp-scan >/dev/null 2>&1 && $HAS_ROOT; then
+            CAN_USE_ARP_SCAN=true
+            echo -e "${G}✓ ARP-scan available${N}"
+        else
+            echo -e "${Y}⚠ ARP-scan not available (will use alternative methods)${N}"
+        fi
+        
+        # ethtool is almost never available on Android
+        if command -v ethtool >/dev/null 2>&1; then
+            CAN_USE_ETHTOOL=true
+            echo -e "${G}✓ Ethtool available${N}"
+        else
+            echo -e "${Y}⚠ Ethtool not available (interface speed detection limited)${N}"
+        fi
+        
+    else
+        # On desktop Linux, these tools are usually available
+        CAN_USE_NMAP=$(command -v nmap >/dev/null 2>&1 && echo true || echo false)
+        CAN_USE_ARP_SCAN=$(command -v arp-scan >/dev/null 2>&1 && echo true || echo false)
+        CAN_USE_ETHTOOL=$(command -v ethtool >/dev/null 2>&1 && echo true || echo false)
+        CAN_SCAN_NETWORK=$CAN_USE_NMAP
+        
+        $CAN_USE_NMAP && echo -e "${G}✓ Nmap available${N}"
+        $CAN_USE_ARP_SCAN && echo -e "${G}✓ ARP-scan available${N}"
+        $CAN_USE_ETHTOOL && echo -e "${G}✓ Ethtool available${N}"
+    fi
+    
+    # Check for essential transfer tools
+    check_transfer_tools
+}
+
+check_transfer_tools() {
+    local missing_tools=()
+    
+    # Check for rsync
+    if ! command -v rsync >/dev/null 2>&1; then
+        missing_tools+=("rsync")
+    else
+        echo -e "${G}✓ rsync available${N}"
+    fi
+    
+    # Check for SSH client
+    if ! command -v ssh >/dev/null 2>&1; then
+        missing_tools+=("openssh")
+    else
+        echo -e "${G}✓ SSH client available${N}"
+    fi
+    
+    # Check for lftp
+    if ! command -v lftp >/dev/null 2>&1; then
+        missing_tools+=("lftp")
+    else
+        echo -e "${G}✓ lftp available${N}"
+    fi
+    
+    # If tools are missing, offer to install them
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        echo -e "${Y}⚠ Missing tools: ${missing_tools[*]}${N}"
+        echo -e "${C}Would you like to install missing dependencies?${N}"
+        read -p "$(echo -e ${Y}[Y/n]: ${N})" INSTALL_CHOICE
+        
+        if [[ ! "$INSTALL_CHOICE" =~ ^[Nn]$ ]]; then
+            install_dependencies_for_platform "${missing_tools[@]}"
+        fi
+    fi
+}
+
+install_dependencies_for_platform() {
+    local tools=("$@")
+    
+    if $IS_TERMUX; then
+        echo -e "${M}[INSTALL] Installing packages via pkg (Termux)...${N}"
+        pkg update -y 2>/dev/null
+        for tool in "${tools[@]}"; do
+            case $tool in
+                openssh)
+                    pkg install -y openssh >/dev/null 2>&1
+                    ;;
+                *)
+                    pkg install -y "$tool" >/dev/null 2>&1
+                    ;;
+            esac
+        done
+        echo -e "${G}✓ Installation complete${N}"
+    elif $IS_DESKTOP_LINUX; then
+        if [[ -f /etc/debian_version ]]; then
+            echo -e "${M}[INSTALL] Installing via apt...${N}"
+            sudo apt-get update -qq >/dev/null 2>&1
+            sudo apt-get install -y rsync lftp openssh-client ethtool nmap arp-scan >/dev/null 2>&1
+        elif [[ -f /etc/redhat-release ]]; then
+            echo -e "${M}[INSTALL] Installing via dnf...${N}"
+            sudo dnf install -y rsync lftp openssh-clients ethtool nmap arp-scan >/dev/null 2>&1
+        elif command -v pacman >/dev/null 2>&1; then
+            echo -e "${M}[INSTALL] Installing via pacman...${N}"
+            sudo pacman -Sy --noconfirm rsync lftp openssh ethtool nmap arp-scan >/dev/null 2>&1
+        fi
+        echo -e "${G}✓ Installation complete${N}"
+    fi
+}
+
+# Unified command execution wrapper - automatically uses the right privilege escalation
+run_as_root() {
+    local cmd="$*"
+    
+    if $HAS_TRADITIONAL_SUDO; then
+        sudo bash -c "$cmd"
+    elif $HAS_MAGISK && command -v tsu >/dev/null 2>&1; then
+        tsu -c "$cmd"
+    elif $HAS_ROOT && command -v su >/dev/null 2>&1; then
+        su -c "$cmd"
+    else
+        # No root available, try anyway and let it fail gracefully
+        bash -c "$cmd" 2>/dev/null || true
+    fi
+}
+
+# Now run the detection
+detect_platform
 # =====================================================================
 #  SYSTEM OPTIMIZATION
 # =====================================================================
@@ -34,38 +294,60 @@ SSH_KEY=""
 optimize_system() {
     echo -e "${M}${BOLD}[TURBO] Optimizing system for MAXIMUM SPEED...${N}"
     
+    if ! $CAN_TUNE_KERNEL; then
+        echo -e "${Y}⚠ Kernel tuning not available on this platform${N}"
+        echo -e "${C}  Continuing with default system settings...${N}"
+        return
+    fi
+    
+    if ! $HAS_ROOT; then
+        echo -e "${Y}⚠ Root access required for system optimization${N}"
+        echo -e "${C}  Transfers will work but may not reach maximum speed${N}"
+        return
+    fi   
     # TCP/Network optimizations
-    sudo sysctl -w net.core.rmem_max=134217728 >/dev/null 2>&1 || true
-    sudo sysctl -w net.core.wmem_max=134217728 >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_timestamps=1 >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_sack=1 >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
-    sudo sysctl -w net.core.netdev_max_backlog=250000 >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
-    sudo sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
-    sudo sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+    run_as_root "sysctl -w net.core.rmem_max=134217728" || true
+    run_as_root "sysctl -w net.core.wmem_max=134217728" || true
+    run_as_root "sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" || true
+    run_as_root "sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" || true
+    run_as_root "sysctl -w net.ipv4.tcp_window_scaling=1" || true
+    run_as_root "sysctl -w net.ipv4.tcp_timestamps=1" || true
+    run_as_root "sysctl -w net.ipv4.tcp_sack=1" || true
+    run_as_root "sysctl -w net.ipv4.tcp_no_metrics_save=1" || true
+    run_as_root "sysctl -w net.core.netdev_max_backlog=250000" || true
+   
+    # BBR congestion control - may not be available on all Android kernels
+    if run_as_root "sysctl -w net.ipv4.tcp_congestion_control=bbr" 2>/dev/null; then
+        run_as_root "sysctl -w net.core.default_qdisc=fq" || true
+        echo -e "${G}✓ BBR congestion control enabled${N}"
+    else
+        echo -e "${Y}⚠ BBR not available (kernel doesn't support it)${N}"
+    fi
     
-    # File system optimizations
-    sudo sysctl -w fs.file-max=2097152 >/dev/null 2>&1 || true
-    sudo sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
-    sudo sysctl -w vm.dirty_ratio=40 >/dev/null 2>&1 || true
-    sudo sysctl -w vm.dirty_background_ratio=10 >/dev/null 2>&1 || true
+    run_as_root "sysctl -w net.ipv4.tcp_mtu_probing=1" || true
     
-    ulimit -n 1048576 2>/dev/null || true
+    # File system optimizations - may fail on Android due to different filesystem
+    if $IS_DESKTOP_LINUX; then
+        run_as_root "sysctl -w fs.file-max=2097152" || true
+        run_as_root "sysctl -w vm.swappiness=10" || true
+        run_as_root "sysctl -w vm.dirty_ratio=40" || true
+        run_as_root "sysctl -w vm.dirty_background_ratio=10" || true
+    fi
     
-    echo -e "${G}✓ System turbocharged!${N}"
+    # Increase file descriptor limit
+    ulimit -n 1048576 2>/dev/null || ulimit -n 4096 2>/dev/null || true
+    
+    echo -e "${G}✓ System optimized within platform capabilities!${N}"
 }
 
 # =====================================================================
-#  NETWORK INTERFACE DETECTION
+#  NETWORK INTERFACE DETECTION (Platform-Aware)
 # =====================================================================
 
 detect_interfaces() {
     echo -e "${B}${BOLD}[SCAN] Detecting network interfaces...${N}\n"
     
+    # Get list of network interfaces, excluding loopback
     mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo")
     
     if [[ ${#IFACES[@]} -eq 0 ]]; then
@@ -76,8 +358,30 @@ detect_interfaces() {
     echo -e "${C}Available interfaces:${N}"
     for i in "${!IFACES[@]}"; do
         IFACE="${IFACES[$i]}"
-        SPEED=$(ethtool "$IFACE" 2>/dev/null | grep -i speed | awk '{print $2}' || echo "Unknown")
+        
+        # Get interface speed - platform-dependent
+        if $CAN_USE_ETHTOOL; then
+            SPEED=$(ethtool "$IFACE" 2>/dev/null | grep -i speed | awk '{print $2}' || echo "Unknown")
+        else
+            # Fallback method for Android/Termux - check wireless or assume unknown
+            if [[ "$IFACE" =~ ^wlan.* ]]; then
+                # Try to get WiFi link speed from iw or assume typical WiFi speeds
+                if command -v iw >/dev/null 2>&1 && $HAS_ROOT; then
+                    SPEED=$(run_as_root "iw dev $IFACE link" 2>/dev/null | grep -i "tx bitrate" | awk '{print $3$4}' || echo "WiFi")
+                else
+                    SPEED="WiFi"
+                fi
+            elif [[ "$IFACE" =~ ^rmnet.* ]] || [[ "$IFACE" =~ ^ccmni.* ]]; then
+                SPEED="Mobile Data"
+            else
+                SPEED="Unknown"
+            fi
+        fi
+        
+        # Get interface status
         STATUS=$(ip link show "$IFACE" | grep -o "state [A-Z]*" | awk '{print $2}')
+        
+        # Get IP address
         IP=$(ip -4 addr show "$IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || echo "No IP")
         
         echo -e "  ${Y}[$((i+1))]${N} ${BOLD}$IFACE${N} - $SPEED - $STATUS - $IP"
@@ -95,35 +399,53 @@ detect_interfaces() {
     echo -e "${G}✓ Using interface: ${BOLD}$INTERFACE${N}\n"
 }
 
-# =====================================================================
-#  NETWORK DISCOVERY & ARP SCANNING
-# =====================================================================
+# =========================================================
+#  NETWORK DISCOVERY & ARP SCAN!
+# =========================================================
 
 install_scan_tools() {
     local missing=()
     
-    command -v nmap >/dev/null 2>&1 || missing+=("nmap")
-    command -v arp-scan >/dev/null 2>&1 || missing+=("arp-scan")
+    if ! $CAN_USE_NMAP && command -v nmap >/dev/null 2>&1; then
+        missing+=("nmap")
+    fi
+    
+    if ! $CAN_USE_ARP_SCAN && command -v arp-scan >/dev/null 2>&1; then
+        missing+=("arp-scan")
+    fi
     
     if [[ ${#missing[@]} -eq 0 ]]; then
         return 0
     fi
     
-    echo -e "${Y}Installing required tools: ${missing[*]}...${N}"
+    echo -e "${Y}Installing network scanning tools...${N}"
     
-    if [[ -f /etc/debian_version ]]; then
-        sudo apt-get update -qq >/dev/null 2>&1
-        sudo apt-get install -y "${missing[@]}" >/dev/null 2>&1
-    elif [[ -f /etc/redhat-release ]]; then
-        sudo dnf install -y "${missing[@]}" >/dev/null 2>&1
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm "${missing[@]}" >/dev/null 2>&1
+    if $IS_TERMUX; then
+        pkg install -y nmap >/dev/null 2>&1
+        if $HAS_ROOT; then
+            echo -e "${G}✓ Nmap installed (root access available for scanning)${N}"
+            CAN_USE_NMAP=true
+            CAN_SCAN_NETWORK=true
+        else
+            echo -e "${Y}⚠ Nmap installed but root required for network scanning${N}"
+        fi
+    elif $IS_DESKTOP_LINUX; then
+        install_dependencies_for_platform "${missing[@]}"
+        CAN_USE_NMAP=true
+        CAN_USE_ARP_SCAN=true
+        CAN_SCAN_NETWORK=true
     fi
-    
-    echo -e "${G}✓ Tools installed successfully${N}"
 }
 
 scan_network() {
+    if ! $CAN_SCAN_NETWORK; then
+        echo -e "${Y}⚠ Network scanning not available on this platform${N}"
+        if $IS_TERMUX && ! $HAS_ROOT; then
+            echo -e "${C}  Network scanning requires root access on Android${N}"
+        fi
+        return 1
+    fi
+    
     echo -e "${M}${BOLD}[DISCOVERY] Scanning network for available servers...${N}"
     
     # Get network subnet
@@ -136,22 +458,29 @@ scan_network() {
     fi
     
     echo -e "${C}Scanning subnet: ${BOLD}$SUBNET${N}"
-    echo -e "${Y}Please wait...${N}\n"
+    echo -e "${Y}This may take 10-30 seconds...${N}\n"
     
-    # ARP scan for quick local discovery
     declare -A DISCOVERED_HOSTS
     
-    if command -v arp-scan >/dev/null 2>&1; then
+    # ARP scan if available
+    if $CAN_USE_ARP_SCAN; then
+        echo -e "${C}[ARP SCAN] Fast discovery mode...${N}"
         while IFS=$'\t' read -r ip mac vendor; do
             [[ "$ip" == "$LOCAL_IP" ]] && continue
             DISCOVERED_HOSTS["$ip"]="$mac | $vendor"
-        done < <(sudo arp-scan --interface="$INTERFACE" --localnet 2>/dev/null | grep -E '^[0-9]+\.' | awk '{print $1"\t"$2"\t"$3" "$4" "$5}')
+        done < <(run_as_root "arp-scan --interface=$INTERFACE --localnet 2>/dev/null | grep -E '^[0-9]+\.' | awk '{print \$1\"\t\"\$2\"\t\"\$3\" \"\$4\" \"\$5}'")
     fi
     
     # Nmap scan for service detection
-    if command -v nmap >/dev/null 2>&1; then
+    if $CAN_USE_NMAP; then
+        echo -e "${C}[NMAP SCAN] Detecting FTP/SSH services...${N}"
         local temp_file=$(mktemp)
-        nmap -p 21,22,990,989 -T4 --open "$SUBNET" -oG "$temp_file" >/dev/null 2>&1
+        
+        if $HAS_ROOT; then
+            run_as_root "nmap -p 21,22,990,989 -T4 --open $SUBNET -oG $temp_file" >/dev/null 2>&1
+        else
+            nmap -p 21,22,990,989 -T4 --open "$SUBNET" -oG "$temp_file" >/dev/null 2>&1
+        fi
         
         while read -r line; do
             if [[ $line =~ Host:\ ([0-9.]+)\ \(.*Ports:\ (.+) ]]; then
@@ -218,6 +547,29 @@ scan_network() {
         echo -e "${R}Invalid selection!${N}"
         return 1
     fi
+}
+
+show_banner() {
+    echo -e "${M}${BOLD}"
+    echo "╔═══════════════════════════════════════════════════════╗"
+    echo "║              UFTLN v$VERSION - by 0xbv1                   ║"
+    echo "║        ULTRA-FAST TERMINAL LINK NETWORK               ║"
+    echo "║       github.com/0xb0rn3/uftln                        ║"
+    
+    # Show platform-specific info
+    if $IS_TERMUX; then
+        echo "║                                                       ║"
+        echo "║  Platform: Termux/Android $([ "$HAS_ROOT" = true ] && echo "(Rooted)" || echo "(Non-root)")                    ║"
+    elif $IS_ANDROID; then
+        echo "║                                                       ║"
+        echo "║  Platform: Android $([ "$HAS_ROOT" = true ] && echo "(Rooted)" || echo "(Non-root)")                          ║"
+    else
+        echo "║                                                       ║"
+        echo "║  Platform: Desktop Linux                             ║"
+    fi
+    
+    echo "╚═══════════════════════════════════════════════════════╝"
+    echo -e "${N}\n"
 }
 
 # =====================================================================
