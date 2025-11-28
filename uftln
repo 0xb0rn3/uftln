@@ -154,23 +154,25 @@ stealthy_ping() {
     local delay=0.1
     
     # Show scanning animation
-    echo -ne "${Y}[${spinner[0]}] Checking host availability...${N}\r"
+    echo -ne "${Y}[⠋] Checking host availability...${N}\r"
     
     # Stealthy ping - single packet, no DNS, low TTL
     local result=0
     if ping -c 1 -W 1 -n -t 32 "$target" >/dev/null 2>&1; then
         result=1
-    elif timeout 2 bash -c "echo > /dev/tcp/$target/22" >/dev/null 2>&1; then
+    elif timeout 2 bash -c "exec 3<>/dev/tcp/$target/22" >/dev/null 2>&1; then
         # Fallback: check if SSH port is open
         result=1
-    elif timeout 2 bash -c "echo > /dev/tcp/$target/21" >/dev/null 2>&1; then
+    elif timeout 2 bash -c "exec 3<>/dev/tcp/$target/21" >/dev/null 2>&1; then
         # Fallback: check if FTP port is open
         result=1
     fi
     
     # Animate through spinner frames
+    local spinchars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     for i in {0..9}; do
-        echo -ne "${Y}[${spinner[$i]}] Checking host availability...${N}\r"
+        local char="${spinchars:$i:1}"
+        echo -ne "${Y}[$char] Checking host availability...${N}\r"
         sleep $delay
     done
     
