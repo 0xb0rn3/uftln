@@ -145,8 +145,55 @@ scan_network() {
         while IFS=
 
 # =====================================================================
-#  PROTOCOL SELECTION
+#  STEALTHY HOST DETECTION
 # =====================================================================
+
+stealthy_ping() {
+    local target="$1"
+    local spinner=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local delay=0.1
+    
+    # Show scanning animation
+    echo -ne "${Y}[${spinner[0]}] Checking host availability...${N}\r"
+    
+    # Stealthy ping - single packet, no DNS, low TTL
+    local result=0
+    if ping -c 1 -W 1 -n -t 32 "$target" >/dev/null 2>&1; then
+        result=1
+    elif timeout 2 nc -zv "$target" 22 >/dev/null 2>&1; then
+        # Fallback: check if SSH port is open
+        result=1
+    elif timeout 2 nc -zv "$target" 21 >/dev/null 2>&1; then
+        # Fallback: check if FTP port is open
+        result=1
+    fi
+    
+    # Animate through spinner frames
+    for i in {0..9}; do
+        echo -ne "${Y}[${spinner[$i]}] Checking host availability...${N}\r"
+        sleep $delay
+    done
+    
+    # Clear line and show result
+    echo -ne "\r\033[K"
+    
+    if [[ $result -eq 1 ]]; then
+        # Animated green indicator
+        for i in {1..3}; do
+            echo -ne "${G}[●] $target - Online${N}\r"
+            sleep 0.15
+            echo -ne "${G}[○] $target - Online${N}\r"
+            sleep 0.15
+        done
+        echo -e "${G}[●] $target - Online${N}"
+        return 0
+    else
+        echo -e "${R}[✗] $target - Offline or unreachable${N}"
+        echo -e "${Y}    Continue anyway? [y/N]: ${N}\c"
+        read -r continue_choice
+        [[ "$continue_choice" =~ ^[Yy]$ ]] && return 0 || return 1
+    fi
+}
 
 select_protocol() {
     echo -e "${M}${BOLD}[PROTOCOL] Select transfer protocol:${N}"
@@ -186,9 +233,17 @@ setup_connection() {
         else
             # Manual entry
             read -p "$(echo -e ${Y}Host: ${N})" HOST
+            if ! stealthy_ping "$HOST"; then
+                echo -e "${R}Aborting connection setup.${N}"
+                exit 1
+            fi
         fi
     else
         read -p "$(echo -e ${Y}Host: ${N})" HOST
+        if ! stealthy_ping "$HOST"; then
+            echo -e "${R}Aborting connection setup.${N}"
+            exit 1
+        fi
     fi
     
     read -p "$(echo -e ${Y}Username: ${N})" USERNAME
@@ -215,13 +270,17 @@ select_mode() {
     echo -e "  ${Y}[1]${N} Upload (Local → Remote)"
     echo -e "  ${Y}[2]${N} Download (Remote → Local)"
     echo -e "  ${Y}[3]${N} Sync (Bidirectional)"
+    echo -e "  ${Y}[4]${N} Mass Upload (Multiple files/folders)"
+    echo -e "  ${Y}[5]${N} Mass Download (Multiple remote paths)"
     echo ""
-    read -p "$(echo -e ${Y}Choice [1-3]: ${N})" MODE_CHOICE
+    read -p "$(echo -e ${Y}Choice [1-5]: ${N})" MODE_CHOICE
     
     case $MODE_CHOICE in
         1) MODE="upload" ;;
         2) MODE="download" ;;
         3) MODE="sync" ;;
+        4) MODE="mass_upload" ;;
+        5) MODE="mass_download" ;;
         *) echo -e "${R}Invalid choice!${N}"; exit 1 ;;
     esac
     
@@ -241,6 +300,44 @@ setup_paths() {
         fi
     fi
     
+    if [[ "$MODE" == "mass_upload" ]]; then
+        echo -e "${C}Enter local paths to upload (one per line, empty line to finish):${N}"
+        LOCAL_PATHS=()
+        while true; do
+            read -p "$(echo -e ${Y}Path $((${#LOCAL_PATHS[@]}+1)): ${N})" path
+            [[ -z "$path" ]] && break
+            if [[ ! -e "$path" ]]; then
+                echo -e "${R}Path doesn't exist! Skipping...${N}"
+                continue
+            fi
+            LOCAL_PATHS+=("$path")
+            echo -e "${G}✓ Added: $path${N}"
+        done
+        
+        if [[ ${#LOCAL_PATHS[@]} -eq 0 ]]; then
+            echo -e "${R}No valid paths provided!${N}"
+            exit 1
+        fi
+        echo -e "${C}Total paths: ${BOLD}${#LOCAL_PATHS[@]}${N}\n"
+    fi
+    
+    if [[ "$MODE" == "mass_download" ]]; then
+        echo -e "${C}Enter remote paths to download (one per line, empty line to finish):${N}"
+        REMOTE_PATHS=()
+        while true; do
+            read -p "$(echo -e ${Y}Remote path $((${#REMOTE_PATHS[@]}+1)): ${N})" path
+            [[ -z "$path" ]] && break
+            REMOTE_PATHS+=("$path")
+            echo -e "${G}✓ Added: $path${N}"
+        done
+        
+        if [[ ${#REMOTE_PATHS[@]} -eq 0 ]]; then
+            echo -e "${R}No valid paths provided!${N}"
+            exit 1
+        fi
+        echo -e "${C}Total paths: ${BOLD}${#REMOTE_PATHS[@]}${N}\n"
+    fi
+    
     if [[ "$MODE" == "download" || "$MODE" == "sync" ]]; then
         read -p "$(echo -e ${Y}Remote path to transfer: ${N})" REMOTE_PATH
     fi
@@ -252,6 +349,17 @@ setup_paths() {
     
     if [[ "$MODE" == "download" ]]; then
         read -p "$(echo -e ${Y}Local destination [default ./downloads]: ${N})" LOCAL_PATH
+        [[ -z "$LOCAL_PATH" ]] && LOCAL_PATH="./downloads"
+        mkdir -p "$LOCAL_PATH"
+    fi
+    
+    if [[ "$MODE" == "mass_upload" ]]; then
+        read -p "$(echo -e ${Y}Remote destination directory [default /]: ${N})" REMOTE_PATH
+        [[ -z "$REMOTE_PATH" ]] && REMOTE_PATH="/"
+    fi
+    
+    if [[ "$MODE" == "mass_download" ]]; then
+        read -p "$(echo -e ${Y}Local destination directory [default ./downloads]: ${N})" LOCAL_PATH
         [[ -z "$LOCAL_PATH" ]] && LOCAL_PATH="./downloads"
         mkdir -p "$LOCAL_PATH"
     fi
@@ -289,12 +397,70 @@ ultra_sftp_transfer() {
             --partial --partial-dir=.rsync-partial \
             --inplace \
             "$USERNAME@$HOST:$REMOTE_PATH" "$LOCAL_PATH/"
-    else
+    elif [[ "$MODE" == "sync" ]]; then
         echo -e "${G}[SYNC MODE] Bidirectional sync...${N}"
         rsync -avz --progress --stats \
             -e "ssh -p $PORT $SSH_OPTS" \
             --delete \
             "$LOCAL_PATH/" "$USERNAME@$HOST:$REMOTE_PATH"
+    elif [[ "$MODE" == "mass_upload" ]]; then
+        echo -e "${G}[MASS UPLOAD] Transferring ${#LOCAL_PATHS[@]} items...${N}\n"
+        local completed=0
+        local failed=0
+        
+        for path in "${LOCAL_PATHS[@]}"; do
+            local basename=$(basename "$path")
+            echo -e "${C}[${G}$((completed+1))${C}/${#LOCAL_PATHS[@]}] Uploading: ${BOLD}$basename${N}"
+            
+            if [[ -d "$path" ]]; then
+                if rsync -avz --progress \
+                    -e "ssh -p $PORT $SSH_OPTS -o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600" \
+                    --bwlimit=0 \
+                    --partial --partial-dir=.rsync-partial \
+                    --inplace \
+                    "$path/" "$USERNAME@$HOST:$REMOTE_PATH/$basename/" 2>/dev/null; then
+                    echo -e "${G}✓ Completed: $basename${N}\n"
+                    ((completed++))
+                else
+                    echo -e "${R}✗ Failed: $basename${N}\n"
+                    ((failed++))
+                fi
+            else
+                if scp -P "$PORT" $SSH_OPTS "$path" "$USERNAME@$HOST:$REMOTE_PATH/" 2>/dev/null; then
+                    echo -e "${G}✓ Completed: $basename${N}\n"
+                    ((completed++))
+                else
+                    echo -e "${R}✗ Failed: $basename${N}\n"
+                    ((failed++))
+                fi
+            fi
+        done
+        
+        echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
+    elif [[ "$MODE" == "mass_download" ]]; then
+        echo -e "${G}[MASS DOWNLOAD] Transferring ${#REMOTE_PATHS[@]} items...${N}\n"
+        local completed=0
+        local failed=0
+        
+        for path in "${REMOTE_PATHS[@]}"; do
+            local basename=$(basename "$path")
+            echo -e "${C}[${G}$((completed+1))${C}/${#REMOTE_PATHS[@]}] Downloading: ${BOLD}$basename${N}"
+            
+            if rsync -avz --progress \
+                -e "ssh -p $PORT $SSH_OPTS -o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600" \
+                --bwlimit=0 \
+                --partial --partial-dir=.rsync-partial \
+                --inplace \
+                "$USERNAME@$HOST:$path" "$LOCAL_PATH/" 2>/dev/null; then
+                echo -e "${G}✓ Completed: $basename${N}\n"
+                ((completed++))
+            else
+                echo -e "${R}✗ Failed: $basename${N}\n"
+                ((failed++))
+            fi
+        done
+        
+        echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
     fi
 }
 
@@ -306,8 +472,46 @@ ultra_scp_transfer() {
     
     if [[ "$MODE" == "upload" ]]; then
         scp -P "$PORT" $SSH_OPTS -r "$LOCAL_PATH" "$USERNAME@$HOST:$REMOTE_PATH"
-    else
+    elif [[ "$MODE" == "download" ]]; then
         scp -P "$PORT" $SSH_OPTS -r "$USERNAME@$HOST:$REMOTE_PATH" "$LOCAL_PATH"
+    elif [[ "$MODE" == "mass_upload" ]]; then
+        echo -e "${G}[MASS UPLOAD] Transferring ${#LOCAL_PATHS[@]} items...${N}\n"
+        local completed=0
+        local failed=0
+        
+        for path in "${LOCAL_PATHS[@]}"; do
+            local basename=$(basename "$path")
+            echo -e "${C}[${G}$((completed+1))${C}/${#LOCAL_PATHS[@]}] Uploading: ${BOLD}$basename${N}"
+            
+            if scp -P "$PORT" $SSH_OPTS -r "$path" "$USERNAME@$HOST:$REMOTE_PATH/" 2>/dev/null; then
+                echo -e "${G}✓ Completed: $basename${N}\n"
+                ((completed++))
+            else
+                echo -e "${R}✗ Failed: $basename${N}\n"
+                ((failed++))
+            fi
+        done
+        
+        echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
+    elif [[ "$MODE" == "mass_download" ]]; then
+        echo -e "${G}[MASS DOWNLOAD] Transferring ${#REMOTE_PATHS[@]} items...${N}\n"
+        local completed=0
+        local failed=0
+        
+        for path in "${REMOTE_PATHS[@]}"; do
+            local basename=$(basename "$path")
+            echo -e "${C}[${G}$((completed+1))${C}/${#REMOTE_PATHS[@]}] Downloading: ${BOLD}$basename${N}"
+            
+            if scp -P "$PORT" $SSH_OPTS -r "$USERNAME@$HOST:$path" "$LOCAL_PATH/" 2>/dev/null; then
+                echo -e "${G}✓ Completed: $basename${N}\n"
+                ((completed++))
+            else
+                echo -e "${R}✗ Failed: $basename${N}\n"
+                ((failed++))
+            fi
+        done
+        
+        echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
     fi
 }
 
@@ -324,12 +528,60 @@ open $HOST
 mirror -R --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$LOCAL_PATH" "$REMOTE_PATH"
 bye
 EOF
-        else
+        elif [[ "$MODE" == "download" ]]; then
             $LFTP_CMD <<EOF
 open $HOST
 mirror --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$REMOTE_PATH" "$LOCAL_PATH"
 bye
 EOF
+        elif [[ "$MODE" == "mass_upload" ]]; then
+            echo -e "${G}[MASS UPLOAD] Transferring ${#LOCAL_PATHS[@]} items...${N}\n"
+            local completed=0
+            local failed=0
+            
+            for path in "${LOCAL_PATHS[@]}"; do
+                local basename=$(basename "$path")
+                echo -e "${C}[${G}$((completed+1))${C}/${#LOCAL_PATHS[@]}] Uploading: ${BOLD}$basename${N}"
+                
+                if $LFTP_CMD <<EOF
+open $HOST
+mirror -R --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$path" "$REMOTE_PATH/$basename"
+bye
+EOF
+                then
+                    echo -e "${G}✓ Completed: $basename${N}\n"
+                    ((completed++))
+                else
+                    echo -e "${R}✗ Failed: $basename${N}\n"
+                    ((failed++))
+                fi
+            done
+            
+            echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
+        elif [[ "$MODE" == "mass_download" ]]; then
+            echo -e "${G}[MASS DOWNLOAD] Transferring ${#REMOTE_PATHS[@]} items...${N}\n"
+            local completed=0
+            local failed=0
+            
+            for path in "${REMOTE_PATHS[@]}"; do
+                local basename=$(basename "$path")
+                echo -e "${C}[${G}$((completed+1))${C}/${#REMOTE_PATHS[@]}] Downloading: ${BOLD}$basename${N}"
+                
+                if $LFTP_CMD <<EOF
+open $HOST
+mirror --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$path" "$LOCAL_PATH/$basename"
+bye
+EOF
+                then
+                    echo -e "${G}✓ Completed: $basename${N}\n"
+                    ((completed++))
+                else
+                    echo -e "${R}✗ Failed: $basename${N}\n"
+                    ((failed++))
+                fi
+            done
+            
+            echo -e "${G}${BOLD}Summary: $completed succeeded, $failed failed${N}"
         fi
     else
         echo -e "${Y}Installing lftp for maximum FTP performance...${N}"
