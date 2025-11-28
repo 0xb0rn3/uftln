@@ -341,50 +341,44 @@ optimize_system() {
 }
 
 # =====================================================================
-#  NETWORK INTERFACE DETECTION (Platform-Aware)
+#  NETWORK INTERFACE DETECTION (Android-Enhanced)
 # =====================================================================
 
 detect_interfaces() {
     echo -e "${B}${BOLD}[SCAN] Detecting network interfaces...${N}\n"
     
-    # Get list of network interfaces, excluding loopback
-    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo")
+    # On Android, we need to be more careful about interface detection
+    if $IS_TERMUX || $IS_ANDROID; then
+        detect_android_interfaces
+    else
+        detect_desktop_interfaces
+    fi
     
     if [[ ${#IFACES[@]} -eq 0 ]]; then
         echo -e "${R}No network interfaces found!${N}"
-        exit 1
+        echo -e "${Y}This might be a permissions issue. Trying with root...${N}\n"
+        
+        if $HAS_ROOT; then
+            # Try again with root privileges
+            if $IS_TERMUX || $IS_ANDROID; then
+                detect_android_interfaces_root
+            fi
+        fi
+        
+        if [[ ${#IFACES[@]} -eq 0 ]]; then
+            echo -e "${R}Still no interfaces found. Debug information:${N}\n"
+            echo -e "${C}Raw ip link output:${N}"
+            ip link show 2>&1
+            echo -e "\n${C}Network interface directory:${N}"
+            ls -la /sys/class/net/ 2>&1
+            exit 1
+        fi
     fi
     
     echo -e "${C}Available interfaces:${N}"
     for i in "${!IFACES[@]}"; do
         IFACE="${IFACES[$i]}"
-        
-        # Get interface speed - platform-dependent
-        if $CAN_USE_ETHTOOL; then
-            SPEED=$(ethtool "$IFACE" 2>/dev/null | grep -i speed | awk '{print $2}' || echo "Unknown")
-        else
-            # Fallback method for Android/Termux - check wireless or assume unknown
-            if [[ "$IFACE" =~ ^wlan.* ]]; then
-                # Try to get WiFi link speed from iw or assume typical WiFi speeds
-                if command -v iw >/dev/null 2>&1 && $HAS_ROOT; then
-                    SPEED=$(run_as_root "iw dev $IFACE link" 2>/dev/null | grep -i "tx bitrate" | awk '{print $3$4}' || echo "WiFi")
-                else
-                    SPEED="WiFi"
-                fi
-            elif [[ "$IFACE" =~ ^rmnet.* ]] || [[ "$IFACE" =~ ^ccmni.* ]]; then
-                SPEED="Mobile Data"
-            else
-                SPEED="Unknown"
-            fi
-        fi
-        
-        # Get interface status
-        STATUS=$(ip link show "$IFACE" | grep -o "state [A-Z]*" | awk '{print $2}')
-        
-        # Get IP address
-        IP=$(ip -4 addr show "$IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || echo "No IP")
-        
-        echo -e "  ${Y}[$((i+1))]${N} ${BOLD}$IFACE${N} - $SPEED - $STATUS - $IP"
+        display_interface_info "$IFACE" "$((i+1))"
     done
     
     echo ""
@@ -397,6 +391,148 @@ detect_interfaces() {
     
     INTERFACE="${IFACES[$((IFACE_NUM-1))]}"
     echo -e "${G}✓ Using interface: ${BOLD}$INTERFACE${N}\n"
+}
+
+detect_android_interfaces() {
+    # Method 1: Try to get interfaces from /sys/class/net (most reliable on Android)
+    if [[ -d /sys/class/net ]]; then
+        echo -e "${C}Scanning /sys/class/net directory...${N}"
+        
+        # Get all interface names from the filesystem
+        for iface_path in /sys/class/net/*; do
+            local iface=$(basename "$iface_path")
+            
+            # Skip loopback explicitly by name match only
+            [[ "$iface" == "lo" ]] && continue
+            
+            # Skip if interface is not up or doesn't exist
+            if [[ -f "$iface_path/operstate" ]]; then
+                local state=$(cat "$iface_path/operstate" 2>/dev/null)
+                # Include interfaces that are up or unknown (some Android interfaces report unknown)
+                if [[ "$state" == "up" ]] || [[ "$state" == "unknown" ]]; then
+                    IFACES+=("$iface")
+                    echo -e "${G}  Found: $iface (state: $state)${N}"
+                fi
+            fi
+        done
+    fi
+    
+    # Method 2: Fallback to ip command with less aggressive filtering
+    if [[ ${#IFACES[@]} -eq 0 ]]; then
+        echo -e "${C}Trying ip command method...${N}"
+        
+        # Don't use grep -v to exclude loopback, use explicit matching instead
+        while read -r iface; do
+            # Explicitly skip only if the interface is exactly "lo"
+            [[ "$iface" == "lo" ]] && continue
+            [[ -z "$iface" ]] && continue
+            
+            # Add to array if it looks like a valid interface name
+            if [[ "$iface" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                IFACES+=("$iface")
+                echo -e "${G}  Found: $iface${N}"
+            fi
+        done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}')
+    fi
+    
+    # Method 3: Last resort - check common Android interface names
+    if [[ ${#IFACES[@]} -eq 0 ]]; then
+        echo -e "${C}Checking for common Android interfaces...${N}"
+        
+        local common_names=("wlan0" "wlan1" "rmnet_data0" "rmnet0" "ccmni0" "eth0" "usb0" "rndis0" "p2p0")
+        
+        for iface in "${common_names[@]}"; do
+            if [[ -d "/sys/class/net/$iface" ]]; then
+                IFACES+=("$iface")
+                echo -e "${G}  Found: $iface${N}"
+            fi
+        done
+    fi
+}
+
+detect_android_interfaces_root() {
+    echo -e "${C}Attempting interface detection with root privileges...${N}"
+    
+    # With root, we can see more interfaces and get better information
+    local root_output=$(run_as_root "ls -1 /sys/class/net/")
+    
+    while read -r iface; do
+        [[ "$iface" == "lo" ]] && continue
+        [[ -z "$iface" ]] && continue
+        
+        # Verify it's actually a network interface
+        if run_as_root "test -d /sys/class/net/$iface" 2>/dev/null; then
+            local state=$(run_as_root "cat /sys/class/net/$iface/operstate" 2>/dev/null)
+            if [[ "$state" == "up" ]] || [[ "$state" == "unknown" ]]; then
+                IFACES+=("$iface")
+                echo -e "${G}  Found (root): $iface${N}"
+            fi
+        fi
+    done <<< "$root_output"
+}
+
+detect_desktop_interfaces() {
+    # Original desktop Linux method - this works fine on traditional systems
+    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v "^lo$")
+}
+
+display_interface_info() {
+    local iface="$1"
+    local index="$2"
+    
+    # Get interface speed - platform and hardware dependent
+    local speed="Unknown"
+    
+    if $CAN_USE_ETHTOOL && $HAS_ROOT; then
+        speed=$(run_as_root "ethtool $iface 2>/dev/null | grep -i speed | awk '{print \$2}'")
+    fi
+    
+    # If ethtool didn't work, try to infer from interface type
+    if [[ "$speed" == "Unknown" ]] || [[ -z "$speed" ]]; then
+        if [[ "$iface" =~ ^wlan.* ]]; then
+            # WiFi interface - try to get actual link speed
+            if command -v iw >/dev/null 2>&1 && $HAS_ROOT; then
+                local wifi_speed=$(run_as_root "iw dev $iface link 2>/dev/null | grep -i 'tx bitrate' | awk '{print \$3\" \"\$4}'")
+                speed="${wifi_speed:-WiFi (speed unknown)}"
+            else
+                # Without root or iw, we can still check if it's 5GHz or 2.4GHz capable
+                if [[ -f "/sys/class/net/$iface/phy80211/index" ]]; then
+                    speed="WiFi (5GHz/2.4GHz)"
+                else
+                    speed="WiFi"
+                fi
+            fi
+        elif [[ "$iface" =~ ^rmnet.* ]] || [[ "$iface" =~ ^ccmni.* ]]; then
+            # Mobile data interface
+            speed="Mobile Data"
+        elif [[ "$iface" =~ ^eth.* ]]; then
+            speed="Ethernet"
+        elif [[ "$iface" =~ ^usb.* ]] || [[ "$iface" =~ ^rndis.* ]]; then
+            speed="USB Tethering"
+        fi
+    fi
+    
+    # Get interface status using a method that works on both Android and desktop
+    local status="UNKNOWN"
+    if [[ -f "/sys/class/net/$iface/operstate" ]]; then
+        status=$(cat "/sys/class/net/$iface/operstate" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    else
+        status=$(ip link show "$iface" 2>/dev/null | grep -o "state [A-Z]*" | awk '{print $2}')
+    fi
+    
+    # Get IP address - this should work on both platforms
+    local ip_addr="No IP"
+    if command -v ip >/dev/null 2>&1; then
+        ip_addr=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        [[ -z "$ip_addr" ]] && ip_addr="No IP"
+    fi
+    
+    # Display with color coding based on status
+    if [[ "$status" == "UP" ]] || [[ "$status" == "UNKNOWN" ]]; then
+        echo -e "  ${Y}[$index]${N} ${BOLD}${G}$iface${N} - $speed - $status - $ip_addr"
+    else
+        echo -e "  ${Y}[$index]${N} ${BOLD}$iface${N} - $speed - ${R}$status${N} - $ip_addr"
+    fi
 }
 
 # =========================================================
