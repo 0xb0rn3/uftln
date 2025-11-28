@@ -22,6 +22,10 @@ CONNECTION_STRING=""
 REMOTE_PATH=""
 LOCAL_PATH=""
 MODE=""
+USERNAME=""
+HOST=""
+PORT=""
+SSH_KEY=""
 
 # =====================================================================
 #  SYSTEM OPTIMIZATION
@@ -137,268 +141,7 @@ scan_network() {
     
     if command -v arp-scan >/dev/null 2>&1; then
         echo -e "${G}[ARP SCAN] Fast discovery mode...${N}"
-        while IFS=
-
-# =====================================================================
-#  PROTOCOL SELECTION
-# =====================================================================
-
-select_protocol() {
-    echo -e "${M}${BOLD}[PROTOCOL] Select transfer protocol:${N}"
-    echo -e "  ${Y}[1]${N} FTP (Fast, unencrypted)"
-    echo -e "  ${Y}[2]${N} FTPS (FTP over SSL/TLS)"
-    echo -e "  ${Y}[3]${N} SFTP (SSH File Transfer - RECOMMENDED)"
-    echo -e "  ${Y}[4]${N} SCP (Secure Copy - Ultra fast)"
-    echo ""
-    read -p "$(echo -e ${Y}Choice [1-4]: ${N})" PROTO_CHOICE
-    
-    case $PROTO_CHOICE in
-        1) PROTOCOL="ftp" ;;
-        2) PROTOCOL="ftps" ;;
-        3) PROTOCOL="sftp" ;;
-        4) PROTOCOL="scp" ;;
-        *) echo -e "${R}Invalid choice!${N}"; exit 1 ;;
-    esac
-    
-    echo -e "${G}✓ Protocol: ${BOLD}${PROTOCOL^^}${N}\n"
-}
-
-# =====================================================================
-#  CONNECTION SETUP
-# =====================================================================
-
-setup_connection() {
-    echo -e "${C}${BOLD}[CONNECT] Connection setup${N}"
-    
-    read -p "$(echo -e ${Y}Username: ${N})" USERNAME
-    read -p "$(echo -e ${Y}Host: ${N})" HOST
-    read -p "$(echo -e ${Y}Port [default 21/22]: ${N})" PORT
-    
-    if [[ -z "$PORT" ]]; then
-        [[ "$PROTOCOL" == "ftp" || "$PROTOCOL" == "ftps" ]] && PORT=21 || PORT=22
-    fi
-    
-    if [[ "$PROTOCOL" == "sftp" || "$PROTOCOL" == "scp" ]]; then
-        read -p "$(echo -e ${Y}SSH key path [press Enter for password]: ${N})" SSH_KEY
-    fi
-    
-    CONNECTION_STRING="$USERNAME@$HOST:$PORT"
-    echo -e "${G}✓ Connection: ${BOLD}$CONNECTION_STRING${N}\n"
-}
-
-# =====================================================================
-#  MODE SELECTION
-# =====================================================================
-
-select_mode() {
-    echo -e "${M}${BOLD}[MODE] Select operation:${N}"
-    echo -e "  ${Y}[1]${N} Upload (Local → Remote)"
-    echo -e "  ${Y}[2]${N} Download (Remote → Local)"
-    echo -e "  ${Y}[3]${N} Sync (Bidirectional)"
-    echo ""
-    read -p "$(echo -e ${Y}Choice [1-3]: ${N})" MODE_CHOICE
-    
-    case $MODE_CHOICE in
-        1) MODE="upload" ;;
-        2) MODE="download" ;;
-        3) MODE="sync" ;;
-        *) echo -e "${R}Invalid choice!${N}"; exit 1 ;;
-    esac
-    
-    echo -e "${G}✓ Mode: ${BOLD}${MODE^^}${N}\n"
-}
-
-# =====================================================================
-#  PATH SETUP
-# =====================================================================
-
-setup_paths() {
-    if [[ "$MODE" == "upload" || "$MODE" == "sync" ]]; then
-        read -p "$(echo -e ${Y}Local path to transfer: ${N})" LOCAL_PATH
-        if [[ ! -e "$LOCAL_PATH" ]]; then
-            echo -e "${R}Path doesn't exist!${N}"
-            exit 1
-        fi
-    fi
-    
-    if [[ "$MODE" == "download" || "$MODE" == "sync" ]]; then
-        read -p "$(echo -e ${Y}Remote path to transfer: ${N})" REMOTE_PATH
-    fi
-    
-    if [[ "$MODE" == "upload" ]]; then
-        read -p "$(echo -e ${Y}Remote destination [default /]: ${N})" REMOTE_PATH
-        [[ -z "$REMOTE_PATH" ]] && REMOTE_PATH="/"
-    fi
-    
-    if [[ "$MODE" == "download" ]]; then
-        read -p "$(echo -e ${Y}Local destination [default ./downloads]: ${N})" LOCAL_PATH
-        [[ -z "$LOCAL_PATH" ]] && LOCAL_PATH="./downloads"
-        mkdir -p "$LOCAL_PATH"
-    fi
-}
-
-# =====================================================================
-#  ULTRA-FAST TRANSFERS
-# =====================================================================
-
-ultra_sftp_transfer() {
-    echo -e "${M}${BOLD}[TRANSFER] Initiating ULTRA-FAST SFTP...${N}\n"
-    
-    SSH_OPTS="-o Compression=no -o Ciphers=aes128-gcm@openssh.com,aes256-gcm@openssh.com -o MACs=umac-128@openssh.com"
-    [[ -n "${SSH_KEY:-}" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
-    
-    if [[ "$MODE" == "upload" ]]; then
-        if [[ -d "$LOCAL_PATH" ]]; then
-            # Use rsync over SSH for maximum speed with parallel transfers
-            echo -e "${G}[BEAST MODE] Parallel directory upload...${N}"
-            rsync -avz --progress --stats \
-                -e "ssh -p $PORT $SSH_OPTS -o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600" \
-                --bwlimit=0 \
-                --partial --partial-dir=.rsync-partial \
-                --inplace \
-                "$LOCAL_PATH/" "$USERNAME@$HOST:$REMOTE_PATH"
-        else
-            # Single file with optimized buffer
-            scp -P "$PORT" $SSH_OPTS -o TCPRcvBufPoll=yes \
-                -o TCPRcvBuf=$BUFFER_SIZE \
-                "$LOCAL_PATH" "$USERNAME@$HOST:$REMOTE_PATH"
-        fi
-    elif [[ "$MODE" == "download" ]]; then
-        echo -e "${G}[BEAST MODE] Parallel download...${N}"
-        rsync -avz --progress --stats \
-            -e "ssh -p $PORT $SSH_OPTS -o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600" \
-            --bwlimit=0 \
-            --partial --partial-dir=.rsync-partial \
-            --inplace \
-            "$USERNAME@$HOST:$REMOTE_PATH" "$LOCAL_PATH/"
-    else
-        echo -e "${G}[SYNC MODE] Bidirectional sync...${N}"
-        rsync -avz --progress --stats \
-            -e "ssh -p $PORT $SSH_OPTS" \
-            --delete \
-            "$LOCAL_PATH/" "$USERNAME@$HOST:$REMOTE_PATH"
-    fi
-}
-
-ultra_scp_transfer() {
-    echo -e "${M}${BOLD}[TRANSFER] Initiating ULTRA-FAST SCP...${N}\n"
-    
-    SSH_OPTS="-o Compression=no -c aes128-gcm@openssh.com -o MACs=umac-128@openssh.com"
-    [[ -n "${SSH_KEY:-}" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
-    
-    if [[ "$MODE" == "upload" ]]; then
-        scp -P "$PORT" $SSH_OPTS -r "$LOCAL_PATH" "$USERNAME@$HOST:$REMOTE_PATH"
-    else
-        scp -P "$PORT" $SSH_OPTS -r "$USERNAME@$HOST:$REMOTE_PATH" "$LOCAL_PATH"
-    fi
-}
-
-ultra_ftp_transfer() {
-    echo -e "${M}${BOLD}[TRANSFER] Initiating FTP transfer...${N}\n"
-    
-    # Use lftp for parallel transfers
-    if command -v lftp >/dev/null 2>&1; then
-        LFTP_CMD="lftp -u $USERNAME -p $PORT"
-        [[ "$PROTOCOL" == "ftps" ]] && LFTP_CMD="$LFTP_CMD -e 'set ftp:ssl-force true'"
-        
-        if [[ "$MODE" == "upload" ]]; then
-            $LFTP_CMD <<EOF
-open $HOST
-mirror -R --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$LOCAL_PATH" "$REMOTE_PATH"
-bye
-EOF
-        else
-            $LFTP_CMD <<EOF
-open $HOST
-mirror --parallel=$PARALLEL_JOBS --use-pget-n=$PARALLEL_JOBS "$REMOTE_PATH" "$LOCAL_PATH"
-bye
-EOF
-        fi
-    else
-        echo -e "${Y}Installing lftp for maximum FTP performance...${N}"
-        sudo apt-get install -y lftp 2>/dev/null || sudo dnf install -y lftp 2>/dev/null || sudo pacman -S --noconfirm lftp
-        ultra_ftp_transfer
-    fi
-}
-
-# =====================================================================
-#  BANDWIDTH MONITOR
-# =====================================================================
-
-monitor_bandwidth() {
-    echo -e "${C}${BOLD}[MONITOR] Real-time bandwidth (Ctrl+C to stop)${N}\n"
-    
-    if command -v iftop >/dev/null 2>&1; then
-        sudo iftop -i "$INTERFACE" -t -s 1
-    elif command -v nload >/dev/null 2>&1; then
-        nload "$INTERFACE"
-    else
-        while true; do
-            RX1=$(cat /sys/class/net/"$INTERFACE"/statistics/rx_bytes)
-            TX1=$(cat /sys/class/net/"$INTERFACE"/statistics/tx_bytes)
-            sleep 1
-            RX2=$(cat /sys/class/net/"$INTERFACE"/statistics/rx_bytes)
-            TX2=$(cat /sys/class/net/"$INTERFACE"/statistics/tx_bytes)
-            
-            RXRATE=$(( (RX2 - RX1) / 1024 / 1024 ))
-            TXRATE=$(( (TX2 - TX1) / 1024 / 1024 ))
-            
-            echo -e "${G}↓ ${RXRATE} MB/s ${R}↑ ${TXRATE} MB/s${N}"
-        done
-    fi
-}
-
-# =====================================================================
-#  MAIN EXECUTION
-# =====================================================================
-
-show_banner() {
-    echo -e "${M}${BOLD}"
-    echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║              UFTLN v$VERSION - by 0xbv1                   ║"
-    echo "║        ULTRA-FAST TERMINAL LINK NETWORK               ║"
-    echo "║       github.com/0xb0rn3/uftln                        ║"
-    echo "╚═══════════════════════════════════════════════════════════╝"
-    echo -e "${N}\n"
-}
-
-main() {
-    show_banner
-    optimize_system
-    detect_interfaces
-    select_protocol
-    setup_connection
-    select_mode
-    setup_paths
-    
-    echo -e "${M}${BOLD}╔═══════════════════════════════════════════════════════════╗${N}"
-    echo -e "${M}${BOLD}║                 TRANSFER STARTING...                  ║${N}"
-    echo -e "${M}${BOLD}╚═══════════════════════════════════════════════════════════╝${N}\n"
-    
-    START_TIME=$(date +%s)
-    
-    case $PROTOCOL in
-        sftp) ultra_sftp_transfer ;;
-        scp) ultra_scp_transfer ;;
-        ftp|ftps) ultra_ftp_transfer ;;
-    esac
-    
-    END_TIME=$(date +%s)
-    DURATION=$((END_TIME - START_TIME))
-    
-    echo -e "\n${G}${BOLD}╔═══════════════════════════════════════════════════════════╗${N}"
-    echo -e "${G}${BOLD}║              TRANSFER COMPLETE!                       ║${N}"
-    echo -e "${G}${BOLD}║              Duration: ${DURATION}s                          ║${N}"
-    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════════╝${N}\n"
-    
-    read -p "$(echo -e ${Y}Monitor bandwidth? [y/N]: ${N})" MONITOR
-    [[ "$MONITOR" =~ ^[Yy]$ ]] && monitor_bandwidth
-}
-
-# Check if running as script
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi\t' read -r ip mac vendor; do
+        while IFS=$'\t' read -r ip mac vendor; do
             [[ "$ip" == "$LOCAL_IP" ]] && continue
             DISCOVERED_HOSTS["$ip"]="$mac | $vendor"
         done < <(sudo arp-scan --interface="$INTERFACE" --localnet 2>/dev/null | grep -E '^[0-9]+\.' | awk '{print $1"\t"$2"\t"$3" "$4" "$5}')
@@ -425,7 +168,7 @@ fi\t' read -r ip mac vendor; do
                 [[ $ports =~ 989/open ]] && services+="FTPS "
                 
                 if [[ -n "$services" ]]; then
-                    if [[ -n "${DISCOVERED_HOSTS[$ip]}" ]]; then
+                    if [[ -n "${DISCOVERED_HOSTS[$ip]:-}" ]]; then
                         DISCOVERED_HOSTS["$ip"]="${DISCOVERED_HOSTS[$ip]} | Services: $services"
                     else
                         DISCOVERED_HOSTS["$ip"]="Unknown MAC | Services: $services"
@@ -442,9 +185,9 @@ fi\t' read -r ip mac vendor; do
         return 1
     fi
     
-    echo -e "\n${G}${BOLD}╔═══════════════════════════════════════════════════════════╗${N}"
+    echo -e "\n${G}${BOLD}╔═══════════════════════════════════════════════════════╗${N}"
     echo -e "${G}${BOLD}║           DISCOVERED SERVERS ON NETWORK               ║${N}"
-    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════════╝${N}\n"
+    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════╝${N}\n"
     
     local -a IP_ARRAY
     local idx=1
@@ -507,10 +250,25 @@ select_protocol() {
 # =====================================================================
 
 setup_connection() {
-    echo -e "${C}${BOLD}[CONNECT] Connection setup${N}"
+    echo -e "${C}${BOLD}[CONNECT] Connection setup${N}\n"
+    
+    echo -e "${Y}Would you like to scan the network for available servers?${N}"
+    read -p "$(echo -e ${Y}[Y/n]: ${N})" SCAN_CHOICE
+    
+    if [[ ! "$SCAN_CHOICE" =~ ^[Nn]$ ]]; then
+        install_scan_tools
+        if scan_network; then
+            # HOST was set by scan_network
+            :
+        else
+            # Manual entry
+            read -p "$(echo -e ${Y}Host: ${N})" HOST
+        fi
+    else
+        read -p "$(echo -e ${Y}Host: ${N})" HOST
+    fi
     
     read -p "$(echo -e ${Y}Username: ${N})" USERNAME
-    read -p "$(echo -e ${Y}Host: ${N})" HOST
     read -p "$(echo -e ${Y}Port [default 21/22]: ${N})" PORT
     
     if [[ -z "$PORT" ]]; then
@@ -588,7 +346,6 @@ ultra_sftp_transfer() {
     
     if [[ "$MODE" == "upload" ]]; then
         if [[ -d "$LOCAL_PATH" ]]; then
-            # Use rsync over SSH for maximum speed with parallel transfers
             echo -e "${G}[BEAST MODE] Parallel directory upload...${N}"
             rsync -avz --progress --stats \
                 -e "ssh -p $PORT $SSH_OPTS -o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600" \
@@ -597,7 +354,6 @@ ultra_sftp_transfer() {
                 --inplace \
                 "$LOCAL_PATH/" "$USERNAME@$HOST:$REMOTE_PATH"
         else
-            # Single file with optimized buffer
             scp -P "$PORT" $SSH_OPTS -o TCPRcvBufPoll=yes \
                 -o TCPRcvBuf=$BUFFER_SIZE \
                 "$LOCAL_PATH" "$USERNAME@$HOST:$REMOTE_PATH"
@@ -635,7 +391,6 @@ ultra_scp_transfer() {
 ultra_ftp_transfer() {
     echo -e "${M}${BOLD}[TRANSFER] Initiating FTP transfer...${N}\n"
     
-    # Use lftp for parallel transfers
     if command -v lftp >/dev/null 2>&1; then
         LFTP_CMD="lftp -u $USERNAME -p $PORT"
         [[ "$PROTOCOL" == "ftps" ]] && LFTP_CMD="$LFTP_CMD -e 'set ftp:ssl-force true'"
@@ -665,15 +420,14 @@ EOF
 # =====================================================================
 
 monitor_bandwidth() {
-    echo -e "[MONITOR] Real-time bandwidth (Ctrl+C to stop)\n"
-
+    echo -e "${C}${BOLD}[MONITOR] Real-time bandwidth (Ctrl+C to stop)${N}\n"
+    
     if command -v iftop >/dev/null 2>&1; then
         sudo iftop -i "$INTERFACE" -t -s 1
     elif command -v nload >/dev/null 2>&1; then
         nload "$INTERFACE"
     else
         while true; do
-            # Check if INTERFACE variable is set and exists
             if [ ! -d /sys/class/net/"$INTERFACE" ]; then
                 echo "Error: Network interface '$INTERFACE' not found."
                 break
@@ -684,12 +438,11 @@ monitor_bandwidth() {
             sleep 1
             RX2=$(cat /sys/class/net/"$INTERFACE"/statistics/rx_bytes)
             TX2=$(cat /sys/class/net/"$INTERFACE"/statistics/tx_bytes)
-
-            # Calculate rate in MB/s (Difference / Time / 1024 / 1024)
+            
             RXRATE=$(( (RX2 - RX1) / 1024 / 1024 ))
             TXRATE=$(( (TX2 - TX1) / 1024 / 1024 ))
-
-            echo -e "↓ ${RXRATE} MB/s ↑ ${TXRATE} MB/s"
+            
+            echo -e "${G}↓ ${RXRATE} MB/s ${R}↑ ${TXRATE} MB/s${N}"
         done
     fi
 }
@@ -700,11 +453,11 @@ monitor_bandwidth() {
 
 show_banner() {
     echo -e "${M}${BOLD}"
-    echo "╔═══════════════════════════════════════════════════════════╗"
+    echo "╔═══════════════════════════════════════════════════════╗"
     echo "║              UFTLN v$VERSION - by 0xbv1                   ║"
     echo "║        ULTRA-FAST TERMINAL LINK NETWORK               ║"
     echo "║       github.com/0xb0rn3/uftln                        ║"
-    echo "╚═══════════════════════════════════════════════════════════╝"
+    echo "╚═══════════════════════════════════════════════════════╝"
     echo -e "${N}\n"
 }
 
@@ -717,9 +470,9 @@ main() {
     select_mode
     setup_paths
     
-    echo -e "${M}${BOLD}╔═══════════════════════════════════════════════════════════╗${N}"
+    echo -e "${M}${BOLD}╔═══════════════════════════════════════════════════════╗${N}"
     echo -e "${M}${BOLD}║                 TRANSFER STARTING...                  ║${N}"
-    echo -e "${M}${BOLD}╚═══════════════════════════════════════════════════════════╝${N}\n"
+    echo -e "${M}${BOLD}╚═══════════════════════════════════════════════════════╝${N}\n"
     
     START_TIME=$(date +%s)
     
@@ -732,10 +485,10 @@ main() {
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     
-    echo -e "\n${G}${BOLD}╔═══════════════════════════════════════════════════════════╗${N}"
+    echo -e "\n${G}${BOLD}╔═══════════════════════════════════════════════════════╗${N}"
     echo -e "${G}${BOLD}║              TRANSFER COMPLETE!                       ║${N}"
     echo -e "${G}${BOLD}║              Duration: ${DURATION}s                          ║${N}"
-    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════════╝${N}\n"
+    echo -e "${G}${BOLD}╚═══════════════════════════════════════════════════════╝${N}\n"
     
     read -p "$(echo -e ${Y}Monitor bandwidth? [y/N]: ${N})" MONITOR
     [[ "$MONITOR" =~ ^[Yy]$ ]] && monitor_bandwidth
