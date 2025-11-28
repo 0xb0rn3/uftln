@@ -665,24 +665,31 @@ EOF
 # =====================================================================
 
 monitor_bandwidth() {
-    echo -e "${C}${BOLD}[MONITOR] Real-time bandwidth (Ctrl+C to stop)${N}\n"
-    
+    echo -e "[MONITOR] Real-time bandwidth (Ctrl+C to stop)\n"
+
     if command -v iftop >/dev/null 2>&1; then
         sudo iftop -i "$INTERFACE" -t -s 1
     elif command -v nload >/dev/null 2>&1; then
         nload "$INTERFACE"
     else
         while true; do
+            # Check if INTERFACE variable is set and exists
+            if [ ! -d /sys/class/net/"$INTERFACE" ]; then
+                echo "Error: Network interface '$INTERFACE' not found."
+                break
+            fi
+            
             RX1=$(cat /sys/class/net/"$INTERFACE"/statistics/rx_bytes)
             TX1=$(cat /sys/class/net/"$INTERFACE"/statistics/tx_bytes)
             sleep 1
             RX2=$(cat /sys/class/net/"$INTERFACE"/statistics/rx_bytes)
             TX2=$(cat /sys/class/net/"$INTERFACE"/statistics/tx_bytes)
-            
+
+            # Calculate rate in MB/s (Difference / Time / 1024 / 1024)
             RXRATE=$(( (RX2 - RX1) / 1024 / 1024 ))
             TXRATE=$(( (TX2 - TX1) / 1024 / 1024 ))
-            
-            echo -e "${G}↓ ${RXRATE} MB/s ${R}↑ ${TXRATE} MB/s${N}"
+
+            echo -e "↓ ${RXRATE} MB/s ↑ ${TXRATE} MB/s"
         done
     fi
 }
