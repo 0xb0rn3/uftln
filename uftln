@@ -160,10 +160,10 @@ stealthy_ping() {
     local result=0
     if ping -c 1 -W 1 -n -t 32 "$target" >/dev/null 2>&1; then
         result=1
-    elif timeout 2 nc -zv "$target" 22 >/dev/null 2>&1; then
+    elif timeout 2 bash -c "echo > /dev/tcp/$target/22" >/dev/null 2>&1; then
         # Fallback: check if SSH port is open
         result=1
-    elif timeout 2 nc -zv "$target" 21 >/dev/null 2>&1; then
+    elif timeout 2 bash -c "echo > /dev/tcp/$target/21" >/dev/null 2>&1; then
         # Fallback: check if FTP port is open
         result=1
     fi
@@ -189,7 +189,7 @@ stealthy_ping() {
         return 0
     else
         echo -e "${R}[✗] $target - Offline or unreachable${N}"
-        echo -e "${Y}    Continue anyway? [y/N]: ${N}\c"
+        echo -ne "${Y}    Continue anyway? [y/N]: ${N}"
         read -r continue_choice
         [[ "$continue_choice" =~ ^[Yy]$ ]] && return 0 || return 1
     fi
